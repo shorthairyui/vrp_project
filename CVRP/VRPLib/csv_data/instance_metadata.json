@@ -1,0 +1,8 @@
+{
+  "name": "X-n101-k25",
+  "type": "CVRP",
+  "dimension": 101,
+  "edge_weight_type": "EUC_2D",
+  "capacity": 206.0,
+  "depot_id": 1
+}
