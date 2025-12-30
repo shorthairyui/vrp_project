@@ -47,7 +47,7 @@ class Step_State:
 
 class CVRPEnv:
     def __init__(self, multi_width, device, ready_time=None, due_time=None, service_time=None,
-                 tardiness_coeff=1.0, enforce_hard_time_windows=False):
+                 tardiness_coeff=1.0, enforce_hard_time_windows=False, use_lookahead_mask=False):
 
         # Const @INIT
         ####################################
@@ -69,6 +69,7 @@ class CVRPEnv:
         self.depot_node_service_time = None
         self.tardiness_coeff = tardiness_coeff
         self.enforce_hard_time_windows = enforce_hard_time_windows
+        self.use_lookahead_mask = use_lookahead_mask
 
         # Const @Load_Problem
         ####################################
@@ -319,6 +320,8 @@ class CVRPEnv:
         waiting_time = torch.clamp(ready_time - arrival_time, min=0)
         tardiness = torch.clamp(arrival_time - due_time, min=0)
         self.current_time = arrival_time + waiting_time + service_time
+        # Scale late arrivals by tardiness_coeff so users can control how costly a
+        # unit of lateness is relative to travel distance.
         self.time_window_penalty += self.tardiness_coeff * tardiness
         self.last_arrival_time = arrival_time
         self.last_waiting_time = waiting_time
@@ -343,6 +346,39 @@ class CVRPEnv:
         time_infeasible = arrival_if_travel > self.depot_node_due_time[:, None, :]
         if self.enforce_hard_time_windows:
             self.ninf_mask[time_infeasible] = float('-inf')
+
+        if self.use_lookahead_mask:
+            base_ninf_mask = self.ninf_mask.clone()
+            # finish time if we travel to each candidate j next (includes waiting + service)
+            ready_time_all = self.depot_node_ready_time[:, None, :].expand(self.batch_size, self.multi_width, -1)
+            service_time_all = self.depot_node_service_time[:, None, :].expand(self.batch_size, self.multi_width, -1)
+            arrival_to_candidate = arrival_if_travel
+            waiting_to_candidate = torch.clamp(ready_time_all - arrival_to_candidate, min=0)
+            finish_candidate = arrival_to_candidate + waiting_to_candidate + service_time_all
+
+            # travel from candidate j to any remaining node i
+            dist_from_candidate = self.dist[:, None, :, :].expand(self.batch_size, self.multi_width, -1, -1)
+            arrival_from_candidate = finish_candidate[:, :, :, None] + dist_from_candidate
+
+            ready_time_exp = self.depot_node_ready_time[:, None, None, :].expand(self.batch_size, self.multi_width, self.problem_size + 1, -1)
+            due_time_exp = self.depot_node_due_time[:, None, None, :].expand(self.batch_size, self.multi_width, self.problem_size + 1, -1)
+            feasible_next = torch.maximum(arrival_from_candidate, ready_time_exp) <= due_time_exp
+
+            remaining_unvisited = (self.visited_ninf_flag == 0)
+            remaining_unvisited[:, :, 0] = False  # ignore depot in reachability check
+            remaining_unvisited_exp = remaining_unvisited[:, :, None, :].expand_as(feasible_next)
+
+            has_remaining = remaining_unvisited_exp.any(dim=3)
+            feasible_exists = (feasible_next & remaining_unvisited_exp).any(dim=3)
+            reachable = torch.where(has_remaining, feasible_exists, torch.ones_like(feasible_exists, dtype=torch.bool))
+
+            lookahead_block = ~reachable & (~self.finished[:, :, None])
+            self.ninf_mask = self.ninf_mask.masked_fill(lookahead_block, float('-inf'))
+
+            # fallback: if lookahead masked everything for a sample, revert to base mask
+            fully_blocked = torch.isinf(self.ninf_mask).all(dim=2)
+            if fully_blocked.any():
+                self.ninf_mask[fully_blocked] = base_ninf_mask[fully_blocked]
 
         newly_finished = (self.visited_ninf_flag == float('-inf')).all(dim=2)
         # shape: (batch, multi)
@@ -476,4 +512,3 @@ class CVRPEnv:
         norm_demand = demand_list / self.load[:, :, None]
 
         return cur_dist, cur_theta, relative_xy, norm_demand
-
