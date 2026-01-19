@@ -192,6 +192,25 @@ def _get_encoding(encoded_nodes, node_index_to_pick):
     return picked_nodes
 
 
+class TwNodeDynamicEmbedder(nn.Module):
+    """
+    Lightweight MLP for mapping node-level dynamic TW features to the model embedding dimension.
+    """
+
+    def __init__(self, in_dim, embedding_dim, hidden_dim=None):
+        super().__init__()
+        hidden_dim = embedding_dim if hidden_dim is None else hidden_dim
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, embedding_dim),
+        )
+
+    def forward(self, dynamic_features):
+        # dynamic_features: (*, in_dim)
+        return self.mlp(dynamic_features)
+
+
 ########################################
 # ENCODER
 ########################################
@@ -301,11 +320,24 @@ class CVRP_Decoder(nn.Module):
         # encoded_nodes.shape: (batch, problem+1, embedding)
         head_num = self.model_params['head_num']
 
-        self.k = reshape_by_heads(self.Wk(encoded_nodes), head_num=head_num)
-        self.v = reshape_by_heads(self.Wv(encoded_nodes), head_num=head_num)
-        # shape: (batch, head_num, problem+1, qkv_dim)
-        self.single_head_key = encoded_nodes.transpose(1, 2)
-        # shape: (batch, embedding, problem+1)
+        if encoded_nodes.dim() == 3:
+            self.k = reshape_by_heads(self.Wk(encoded_nodes), head_num=head_num)
+            self.v = reshape_by_heads(self.Wv(encoded_nodes), head_num=head_num)
+            # shape: (batch, head_num, problem+1, qkv_dim)
+            self.single_head_key = encoded_nodes.transpose(1, 2)
+            # shape: (batch, embedding, problem+1)
+        elif encoded_nodes.dim() == 4:
+            # encoded_nodes.shape: (batch, pomo, problem+1, embedding)
+            batch, pomo, problem, _ = encoded_nodes.shape
+            k = self.Wk(encoded_nodes)
+            v = self.Wv(encoded_nodes)
+            self.k = k.view(batch, pomo, problem, head_num, -1).permute(0, 3, 1, 2, 4)
+            self.v = v.view(batch, pomo, problem, head_num, -1).permute(0, 3, 1, 2, 4)
+            # shape: (batch, head_num, pomo, problem+1, qkv_dim)
+            self.single_head_key = encoded_nodes.transpose(2, 3)
+            # shape: (batch, pomo, embedding, problem+1)
+        else:
+            raise ValueError(f"Unexpected encoded_nodes dim: {encoded_nodes.dim()}")
 
     def set_q1(self, encoded_q1):
         # encoded_q.shape: (batch, n, embedding)  # n can be 1 or pomo
@@ -333,7 +365,7 @@ class CVRP_Decoder(nn.Module):
         q_last = reshape_by_heads(self.Wq_last(input_cat), head_num=head_num)
         # shape: (batch, head_num, pomo, qkv_dim)
 
-        q = q_last
+        q = q_last if self.k.dim() == 4 else q_last.unsqueeze(3)
         # shape: (batch, head_num, pomo, qkv_dim)
         out_concat = multi_head_attention(q, self.k, self.v, rank3_ninf_mask=ninf_mask)
         # shape: (batch, pomo, head_num*qkv_dim)
@@ -343,8 +375,12 @@ class CVRP_Decoder(nn.Module):
 
         #  Single-Head Attention, for probability calculation
         #######################################################
-        score = torch.matmul(mh_atten_out, self.single_head_key)
-        # shape: (batch, pomo, problem)
+        if self.single_head_key.dim() == 3:
+            score = torch.matmul(mh_atten_out, self.single_head_key)
+            # shape: (batch, pomo, problem)
+        else:
+            score = torch.matmul(mh_atten_out.unsqueeze(2), self.single_head_key).squeeze(2)
+            # shape: (batch, pomo, problem)
 
         sqrt_embedding_dim = self.model_params['embedding_dim'] ** 0.5
         logit_clipping = self.model_params['logit_clipping']
