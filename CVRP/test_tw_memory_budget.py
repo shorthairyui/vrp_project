@@ -23,7 +23,7 @@ def test_dynamic_attention_memory_budget():
         'ensemble': False,
         'lazy_mask_alpha': 1.0,
         'lazy_mask_q_dim': 16,
-        'lazy_mask_dyn_dim': 6,
+        'lazy_mask_dyn_dim': 3,
         'lazy_mask_hidden_dim': 64,
     }
 
@@ -38,7 +38,7 @@ def test_dynamic_attention_memory_budget():
     xy = torch.rand(batch, pomo, nodes, 2, device=device)
     norm_demand = torch.rand(batch, pomo, nodes, device=device)
     ninf_mask = torch.zeros(batch, pomo, nodes, device=device)
-    x_dyn = torch.rand(batch, pomo, nodes, 6, device=device)
+    x_dyn = torch.rand(batch, pomo, nodes, 3, device=device)
 
     torch.cuda.reset_peak_memory_stats(device)
     _ = decoder(
