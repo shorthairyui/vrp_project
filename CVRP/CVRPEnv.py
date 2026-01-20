@@ -20,6 +20,12 @@ class Reset_State:
     # shape: (batch, problem)
     service_time: torch.Tensor = None
     # shape: (batch, problem)
+    ready_time_with_depot: torch.Tensor = None
+    # shape: (batch, problem+1)
+    due_time_with_depot: torch.Tensor = None
+    # shape: (batch, problem+1)
+    service_time_with_depot: torch.Tensor = None
+    # shape: (batch, problem+1)
     dist: torch.Tensor = None
     # shape: (batch, problem+1, problem+1)
 
@@ -43,6 +49,14 @@ class Step_State:
     # shape: (batch, multi)
     last_tardiness: torch.Tensor = None
     # shape: (batch, multi)
+    ready_time_with_depot: torch.Tensor = None
+    # shape: (batch, problem+1)
+    due_time_with_depot: torch.Tensor = None
+    # shape: (batch, problem+1)
+    service_time_with_depot: torch.Tensor = None
+    # shape: (batch, problem+1)
+    visited: torch.Tensor = None
+    # shape: (batch, multi, problem+1)
 
 
 class CVRPEnv:
@@ -176,6 +190,9 @@ class CVRPEnv:
         self.reset_state.ready_time = ready_time[:, 1:]
         self.reset_state.due_time = due_time[:, 1:]
         self.reset_state.service_time = service_time[:, 1:]
+        self.reset_state.ready_time_with_depot = ready_time
+        self.reset_state.due_time_with_depot = due_time
+        self.reset_state.service_time_with_depot = service_time
         self.problem_size = self.reset_state.node_xy.shape[1]
 
         self.dist = (self.depot_node_xy[:, :, None, :] - self.depot_node_xy[:, None, :, :]).norm(p=2, dim=-1)
@@ -234,6 +251,9 @@ class CVRPEnv:
         self.reset_state.ready_time = ready_time[:, 1:]
         self.reset_state.due_time = due_time[:, 1:]
         self.reset_state.service_time = service_time[:, 1:]
+        self.reset_state.ready_time_with_depot = ready_time
+        self.reset_state.due_time_with_depot = due_time
+        self.reset_state.service_time_with_depot = service_time
         self.problem_size = self.reset_state.node_xy.shape[1]
         self.dist = (self.depot_node_xy[:, :, None, :] - self.depot_node_xy[:, None, :, :]).norm(p=2, dim=-1)
         # shape: (batch, problem+1, problem+1)
@@ -281,6 +301,10 @@ class CVRPEnv:
         self.step_state.last_arrival_time = self.last_arrival_time
         self.step_state.last_waiting_time = self.last_waiting_time
         self.step_state.last_tardiness = self.last_tardiness
+        self.step_state.ready_time_with_depot = self.depot_node_ready_time
+        self.step_state.due_time_with_depot = self.depot_node_due_time
+        self.step_state.service_time_with_depot = self.depot_node_service_time
+        self.step_state.visited = (self.visited_ninf_flag == float('-inf'))
 
         reward = None
         done = False
@@ -397,6 +421,10 @@ class CVRPEnv:
         self.step_state.last_arrival_time = self.last_arrival_time
         self.step_state.last_waiting_time = self.last_waiting_time
         self.step_state.last_tardiness = self.last_tardiness
+        self.step_state.ready_time_with_depot = self.depot_node_ready_time
+        self.step_state.due_time_with_depot = self.depot_node_due_time
+        self.step_state.service_time_with_depot = self.depot_node_service_time
+        self.step_state.visited = (self.visited_ninf_flag == float('-inf'))
         # returning values
         hard_violation = None
         if self.enforce_hard_time_windows:

@@ -17,6 +17,12 @@ class CVRPModel(nn.Module):
         self.decoder = CVRP_Decoder(**model_params)
         self.encoded_nodes = None
         # shape: (batch, problem, embedding)
+        self.use_tw_node_dynamic_embed = self.model_params.get('use_tw_node_dynamic_embed', False)
+        self.dynamic_feature_dim = 6
+        self._time_eps = 1e-6
+        self.ready_time_with_depot = None
+        self.due_time_with_depot = None
+        self.service_time_with_depot = None
 
     def pre_forward(self, reset_state):
         depot_xy = reset_state.depot_xy
@@ -31,7 +37,57 @@ class CVRPModel(nn.Module):
         # shape: (batch, problem, 3)
         self.encoded_nodes = self.encoder(depot_xy, node_xy_demand, dist)
         # shape: (batch, problem+1, embedding)
+        if self.use_tw_node_dynamic_embed:
+            self.ready_time_with_depot = reset_state.ready_time_with_depot
+            self.due_time_with_depot = reset_state.due_time_with_depot
+            self.service_time_with_depot = reset_state.service_time_with_depot
         self.decoder.set_kv(self.encoded_nodes)
+
+    def compute_tw_node_dynamic_features(self, state, cur_dist):
+        """
+        Build normalized per-node dynamic TW features for the current decoding step.
+        """
+        if cur_dist is None:
+            return None
+
+        ready_time = state.ready_time_with_depot if state.ready_time_with_depot is not None else self.ready_time_with_depot
+        due_time = state.due_time_with_depot if state.due_time_with_depot is not None else self.due_time_with_depot
+        service_time = state.service_time_with_depot if state.service_time_with_depot is not None else self.service_time_with_depot
+        if ready_time is None or due_time is None or service_time is None:
+            return None
+
+        batch_size, multi_width, _ = cur_dist.shape
+        ready_time = ready_time[:, None, :].expand(batch_size, multi_width, -1)
+        due_time = due_time[:, None, :].expand(batch_size, multi_width, -1)
+        service_time = service_time[:, None, :].expand(batch_size, multi_width, -1)
+
+        arrival_time = state.current_time[:, :, None] + cur_dist
+        waiting_time = torch.clamp(ready_time - arrival_time, min=0)
+        start_time = torch.maximum(arrival_time, ready_time)
+        finish_time = start_time + service_time
+        slack = due_time - start_time
+
+        finite_due_time = torch.where(torch.isinf(due_time), due_time.new_zeros(()), due_time)
+        time_scale = finite_due_time.max(dim=2)[0].clamp(min=self._time_eps)[:, :, None]
+        time_scale_expanded = time_scale
+
+        slack = torch.where(torch.isinf(slack), time_scale_expanded, slack)
+
+        visited = state.visited if state.visited is not None else (state.ninf_mask == float('-inf'))
+        visited = visited.float()
+
+        features = torch.stack(
+            (
+                arrival_time / time_scale_expanded,
+                waiting_time / time_scale_expanded,
+                start_time / time_scale_expanded,
+                finish_time / time_scale_expanded,
+                slack / time_scale_expanded,
+                visited,
+            ),
+            dim=-1,
+        )
+        return features
 
     def one_step_rollout(self, state, cur_dist, cur_theta, xy, norm_demand, eval_type):
         device = state.ninf_mask.device
@@ -51,9 +107,22 @@ class CVRPModel(nn.Module):
             prob = torch.ones(size=(batch_size, multi_width), device=device)
 
         else:
+            if self.use_tw_node_dynamic_embed:
+                x_dyn = self.compute_tw_node_dynamic_features(state, cur_dist)
+            else:
+                x_dyn = None
             encoded_last_node = _get_encoding(self.encoded_nodes, state.current_node)
             # shape: (batch, pomo+1, embedding)
-            probs = self.decoder(encoded_last_node, state.load, cur_dist, cur_theta, xy, norm_demand=norm_demand, ninf_mask=state.ninf_mask)
+            probs = self.decoder(
+                encoded_last_node,
+                state.load,
+                cur_dist,
+                cur_theta,
+                xy,
+                norm_demand=norm_demand,
+                ninf_mask=state.ninf_mask,
+                x_dyn=x_dyn,
+            )
             # shape: (batch, pomo+1, problem+1)
 
             if eval_type == 'sample':

@@ -47,3 +47,8 @@ model_params:
   local_att_hidden_dim: 32
   local_att_head_num: 4
   local_att_qkv_dim: 8
+  use_tw_node_dynamic_embed: False
+  lazy_mask_alpha: 1.0
+  lazy_mask_q_dim: 16
+  lazy_mask_dyn_dim: 6
+  lazy_mask_hidden_dim: 64
