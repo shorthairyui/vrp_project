@@ -50,5 +50,5 @@ model_params:
   use_tw_node_dynamic_embed: False
   lazy_mask_alpha: 1.0
   lazy_mask_q_dim: 16
-  lazy_mask_dyn_dim: 6
+  lazy_mask_dyn_dim: 3
   lazy_mask_hidden_dim: 64

@@ -18,7 +18,7 @@ class CVRPModel(nn.Module):
         self.encoded_nodes = None
         # shape: (batch, problem, embedding)
         self.use_tw_node_dynamic_embed = self.model_params.get('use_tw_node_dynamic_embed', False)
-        self.dynamic_feature_dim = 6
+        self.dynamic_feature_dim = 3
         self._time_eps = 1e-6
         self.ready_time_with_depot = None
         self.due_time_with_depot = None
@@ -56,38 +56,32 @@ class CVRPModel(nn.Module):
         if ready_time is None or due_time is None or service_time is None:
             return None
 
-        batch_size, multi_width, _ = cur_dist.shape
-        ready_time = ready_time[:, None, :].expand(batch_size, multi_width, -1)
-        due_time = due_time[:, None, :].expand(batch_size, multi_width, -1)
-        service_time = service_time[:, None, :].expand(batch_size, multi_width, -1)
+        with torch.no_grad():
+            batch_size, multi_width, _ = cur_dist.shape
+            ready_time = ready_time[:, None, :].expand(batch_size, multi_width, -1)
+            due_time = due_time[:, None, :].expand(batch_size, multi_width, -1)
+            service_time = service_time[:, None, :].expand(batch_size, multi_width, -1)
 
-        arrival_time = state.current_time[:, :, None] + cur_dist
-        waiting_time = torch.clamp(ready_time - arrival_time, min=0)
-        start_time = torch.maximum(arrival_time, ready_time)
-        finish_time = start_time + service_time
-        slack = due_time - start_time
+            arrival_time = state.current_time[:, :, None] + cur_dist
+            start_time = torch.maximum(arrival_time, ready_time)
+            slack_arrival = due_time - arrival_time
+            slack_start = due_time - start_time
 
-        finite_due_time = torch.where(torch.isinf(due_time), due_time.new_zeros(()), due_time)
-        time_scale = finite_due_time.max(dim=2)[0].clamp(min=self._time_eps)[:, :, None]
-        time_scale_expanded = time_scale
+            finite_due_time = torch.where(torch.isinf(due_time), due_time.new_zeros(()), due_time)
+            time_scale = finite_due_time.max(dim=2)[0].clamp(min=self._time_eps)[:, :, None]
 
-        slack = torch.where(torch.isinf(slack), time_scale_expanded, slack)
+            slack_arrival = torch.where(torch.isinf(slack_arrival), time_scale, slack_arrival)
+            slack_start = torch.where(torch.isinf(slack_start), time_scale, slack_start)
 
-        visited = state.visited if state.visited is not None else (state.ninf_mask == float('-inf'))
-        visited = visited.float()
-
-        features = torch.stack(
-            (
-                arrival_time / time_scale_expanded,
-                waiting_time / time_scale_expanded,
-                start_time / time_scale_expanded,
-                finish_time / time_scale_expanded,
-                slack / time_scale_expanded,
-                visited,
-            ),
-            dim=-1,
-        )
-        return features
+            features = torch.stack(
+                (
+                    slack_arrival / time_scale,
+                    slack_start / time_scale,
+                    cur_dist / time_scale,
+                ),
+                dim=-1,
+            )
+        return features.detach()
 
     def one_step_rollout(self, state, cur_dist, cur_theta, xy, norm_demand, eval_type):
         device = state.ninf_mask.device
