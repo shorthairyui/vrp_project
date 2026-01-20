@@ -47,3 +47,5 @@ model_params:
   local_att_hidden_dim: 32
   local_att_head_num: 4
   local_att_qkv_dim: 8
+  use_tw_node_dynamic_embed: False
+  tw_node_dynamic_embed_chunked: False
