@@ -53,15 +53,28 @@ def test_tw_node_dynamic_embedding_demo(capsys):
     cur_dist, cur_theta, xy, norm_demand = env.get_cur_feature()
 
     x_dyn = model.compute_tw_node_dynamic_features(state, cur_dist)
-    fused_nodes, _, h_dyn = model._compute_tw_node_fused_embeddings(state, cur_dist)
-
-    assert x_dyn is not None and fused_nodes is not None
+    assert x_dyn is not None
     assert x_dyn.shape[-1] == model.dynamic_feature_dim
-    assert fused_nodes.shape[-1] == model.model_params['embedding_dim']
+
+    encoded_last_node = model.encoded_nodes.gather(
+        dim=1,
+        index=state.current_node[:, :, None].expand(1, 1, model.encoded_nodes.size(-1)),
+    )
+    probs = model.decoder(
+        encoded_last_node,
+        state.load,
+        cur_dist,
+        cur_theta,
+        xy,
+        norm_demand=norm_demand,
+        ninf_mask=state.ninf_mask,
+        x_dyn=x_dyn,
+    )
+    assert probs.shape[-1] == env.problem_size + 1
 
     # Demo printouts for quick inspection during development
     print("X_dyn step features (batch=0, pomo=0):", x_dyn[0, 0])
-    print("H_dyn mean/std:", h_dyn.mean().item(), h_dyn.std().item())
+    print("probs mean/std:", probs.mean().item(), probs.std().item())
 
     captured = capsys.readouterr()
     assert "X_dyn step features" in captured.out

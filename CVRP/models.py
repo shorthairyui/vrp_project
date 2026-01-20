@@ -211,6 +211,52 @@ class TwNodeDynamicEmbedder(nn.Module):
         return self.mlp(dynamic_features)
 
 
+class FiLMStateModulator(nn.Module):
+    """
+    Produce FiLM gamma from rollout state without expanding to (B, P, N, d).
+    """
+
+    def __init__(self, input_dim, head_num, qkv_dim, hidden_dim=None):
+        super().__init__()
+        hidden_dim = input_dim if hidden_dim is None else hidden_dim
+        self.head_num = head_num
+        self.qkv_dim = qkv_dim
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, head_num * qkv_dim),
+        )
+
+    def forward(self, state_embed):
+        # state_embed: (batch, pomo, input_dim)
+        gamma = self.mlp(state_embed)
+        gamma = gamma.view(state_embed.size(0), state_embed.size(1), self.head_num, self.qkv_dim)
+        return torch.sigmoid(gamma) * 2.0
+
+
+class LazyMaskPredictor(nn.Module):
+    """
+    Predict a negative scalar bias per node from low-dim dynamic features.
+    """
+
+    def __init__(self, dyn_dim, q_dim, hidden_dim=64):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(dyn_dim + q_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, dyn_features, q_features):
+        # dyn_features: (batch, pomo, nodes, dyn_dim)
+        # q_features: (batch, pomo, q_dim)
+        q_expanded = q_features[:, :, None, :].expand(dyn_features.size(0), dyn_features.size(1), dyn_features.size(2), -1)
+        out = self.mlp(torch.cat((dyn_features, q_expanded), dim=-1))
+        return -F.softplus(out).squeeze(-1)
+
+
 ########################################
 # ENCODER
 ########################################
@@ -305,6 +351,14 @@ class CVRP_Decoder(nn.Module):
         self.Wv = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
 
         self.multi_head_combine = nn.Linear(head_num * qkv_dim, embedding_dim)
+        self.film_modulator = FiLMStateModulator(embedding_dim + 1, head_num, qkv_dim)
+        self.lazy_q_proj = nn.Linear(embedding_dim + 1, self.model_params.get('lazy_mask_q_dim', 16))
+        self.lazy_mask_predictor = LazyMaskPredictor(
+            dyn_dim=self.model_params.get('lazy_mask_dyn_dim', 6),
+            q_dim=self.model_params.get('lazy_mask_q_dim', 16),
+            hidden_dim=self.model_params.get('lazy_mask_hidden_dim', 64),
+        )
+        self.lazy_mask_alpha = self.model_params.get('lazy_mask_alpha', 1.0)
 
         self.k = None  # saved key, for multi-head attention
         self.v = None  # saved value, for multi-head_attention
@@ -351,7 +405,7 @@ class CVRP_Decoder(nn.Module):
         self.q2 = reshape_by_heads(self.Wq_2(encoded_q2), head_num=head_num)
         # shape: (batch, head_num, n, qkv_dim)
 
-    def forward(self, encoded_last_node, load, cur_dist, cur_theta, xy, norm_demand, ninf_mask):
+    def forward(self, encoded_last_node, load, cur_dist, cur_theta, xy, norm_demand, ninf_mask, x_dyn=None):
         # encoded_last_node.shape: (batch, pomo, embedding)
         # load.shape: (batch, pomo)
         # ninf_mask.shape: (batch, pomo, problem)
@@ -365,7 +419,9 @@ class CVRP_Decoder(nn.Module):
         q_last = reshape_by_heads(self.Wq_last(input_cat), head_num=head_num)
         # shape: (batch, head_num, pomo, qkv_dim)
 
-        q = q_last if self.k.dim() == 4 else q_last.unsqueeze(3)
+        gamma = self.film_modulator(input_cat)
+        q_mod = q_last * gamma.permute(0, 2, 1, 3)
+        q = q_mod if self.k.dim() == 4 else q_mod.unsqueeze(3)
         # shape: (batch, head_num, pomo, qkv_dim)
         out_concat = multi_head_attention(q, self.k, self.v, rank3_ninf_mask=ninf_mask)
         # shape: (batch, pomo, head_num*qkv_dim)
@@ -386,6 +442,11 @@ class CVRP_Decoder(nn.Module):
         logit_clipping = self.model_params['logit_clipping']
 
         score_scaled = score / sqrt_embedding_dim
+
+        if x_dyn is not None:
+            q_small = self.lazy_q_proj(input_cat)
+            lazy_bias = self.lazy_mask_predictor(x_dyn, q_small)
+            score_scaled = score_scaled + self.lazy_mask_alpha * lazy_bias
 
         if self.model_params['distance_penalty']:
             local_size = self.model_params['local_size'][0]
